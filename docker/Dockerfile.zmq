@@ -1,0 +1,45 @@
+# OCUDU gNB with ZeroMQ RF, for the ZMQ (simulated radio) setup of the testbed.
+#
+# The upstream images (docker/Dockerfile of OCUDU) are built without ZeroMQ (libzmq is only in the "extra"
+# dependencies of install_dependencies.sh), hence this small Dockerfile. It reuses the upstream build scripts and must
+# be built with the patched OCUDU tree as context (see build_image.sh):
+#   docker build -f Dockerfile.zmq --build-arg MARCH=... -t ocudu-gnb-csi:<tag>-zmq <patched_ocudu_dir>
+
+ARG OS=ubuntu
+ARG OS_VERSION=24.04
+
+FROM ${OS}:${OS_VERSION} AS builder
+
+COPY docker/scripts/ /src/docker/scripts/
+RUN /src/docker/scripts/install_dependencies.sh build && \
+    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libzmq3-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+ARG MARCH=native
+ARG NUM_JOBS=""
+ARG EXTRA_CMAKE_ARGS=""
+
+ADD . /src
+
+# Fails if the gNB is not linked with libzmq (ENABLE_ZEROMQ silently turns off when libzmq is not found).
+RUN if [ -z "$NUM_JOBS" ]; then NUM_JOBS=$(nproc); fi \
+    && /src/docker/scripts/builder.sh -c gcc -m "-j${NUM_JOBS} gnb" \
+       -DBUILD_TESTING=False -DENABLE_UHD=Off -DENABLE_DPDK=Off -DENABLE_ZEROMQ=On \
+       -DMARCH=${MARCH} ${EXTRA_CMAKE_ARGS} /src \
+    && ldd /src/build/apps/gnb/gnb | grep -q libzmq \
+    && mkdir -p /opt/ocudu/bin \
+    && cp /src/build/apps/gnb/gnb /opt/ocudu/bin/gnb \
+    && rm -rf /src
+
+FROM ${OS}:${OS_VERSION} AS runtime
+
+ARG OCUDU_IMAGE_VERSION=dev
+LABEL summary="OCUDU gNB (ZeroMQ) with the per-RB SRS CSI logger" version="${OCUDU_IMAGE_VERSION}"
+
+COPY docker/scripts/install_dependencies.sh docker/scripts/common.sh /usr/local/etc/
+RUN /usr/local/etc/install_dependencies.sh run && \
+    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libzmq5 && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=builder /opt/ocudu/bin/gnb /usr/local/bin/gnb
+# Fails if a shared library of the gNB is missing in the runtime image.
+RUN ! ldd /usr/local/bin/gnb | grep "not found"
