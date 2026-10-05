@@ -5,6 +5,8 @@
 #                           fronthaul, e.g. Benetel). Tag <image>:<ocudu_tag>.
 #   uhd variant:            upstream docker/Dockerfile, unmodified, target runtime-uhd, COMPONENT=gnb (USRP).
 #                           Tag <image>:<ocudu_tag>-uhd.
+#   dpdk and uhd: docker/Dockerfile.tools then adds iproute2, ping and tcpdump on top of the upstream image (tag
+#                 <tag>-upstream), as in the former srsRAN images (the srsran-helm chart runs "ip route").
 #   zmq variant:            docker/Dockerfile.zmq of this repo (upstream images have no ZeroMQ). Tag <image>:<ocudu_tag>-zmq.
 #
 # Usage: build_image.sh [-t OCUDU_TAG] [-v dpdk|uhd|zmq] [-m MARCH] [-j NUM_JOBS] [-i IMAGE] [-r OCUDU_REPO] [-s SRC_DIR]
@@ -60,7 +62,11 @@ if [ $VARIANT = dpdk ] || [ $VARIANT = uhd ]; then
   if [ $VARIANT = uhd ]; then TAG="$TAG-uhd"; fi
   docker build -f "$WORK/ocudu/docker/Dockerfile" --target runtime-$VARIANT \
     --build-arg COMPONENT=gnb --build-arg MARCH="$MARCH" --build-arg NUM_JOBS="$NUM_JOBS" \
-    --build-arg OCUDU_IMAGE_VERSION="$OCUDU_TAG-csi" "${LABELS[@]}" -t "$TAG" "$@" "$WORK/ocudu"
+    --build-arg OCUDU_IMAGE_VERSION="$OCUDU_TAG-csi" "${LABELS[@]}" -t "$TAG-upstream" "$@" "$WORK/ocudu"
+  # Tools layer; the user of the upstream image (uid 1001) is kept
+  RUN_USER=$(docker image inspect -f '{{.Config.User}}' "$TAG-upstream")
+  docker build -f "$HERE/docker/Dockerfile.tools" --build-arg BASE="$TAG-upstream" \
+    --build-arg RUN_USER="${RUN_USER:-root}" "${LABELS[@]}" -t "$TAG" "$HERE/docker"
 else
   TAG="$IMAGE:$OCUDU_TAG-zmq"
   docker build -f "$HERE/docker/Dockerfile.zmq" \

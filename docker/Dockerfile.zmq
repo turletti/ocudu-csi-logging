@@ -38,7 +38,8 @@ LABEL summary="OCUDU gNB (ZeroMQ) with the per-RB SRS CSI logger" version="${OCU
 
 COPY docker/scripts/install_dependencies.sh docker/scripts/common.sh /usr/local/etc/
 RUN /usr/local/etc/install_dependencies.sh run && \
-    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libzmq5 && \
+    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libzmq5 \
+        iproute2 iputils-ping tcpdump && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=builder /opt/ocudu/bin/gnb /usr/local/bin/gnb
 # Fails if a shared library of the gNB is missing in the runtime image.

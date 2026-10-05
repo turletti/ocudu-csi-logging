@@ -1,0 +1,10 @@
+# Network and debug tools used by the srsran-helm gNB chart (ip route ...) and present in the former srsRAN images,
+# added on top of an upstream OCUDU runtime image (dpdk / uhd variants of build_image.sh). The image user is kept.
+ARG BASE
+FROM ${BASE}
+ARG RUN_USER=root
+USER root
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        iproute2 iputils-ping tcpdump && \
+    rm -rf /var/lib/apt/lists/*
+USER ${RUN_USER}

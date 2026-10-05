@@ -61,6 +61,9 @@ The logger is created before `main()` (static initialisation), so the preallocat
   `capabilities.add`, or `privileged`).
 - `zmq`: `docker/Dockerfile.zmq`, which reuses the upstream build scripts (upstream images have no ZeroMQ) and checks
   that `gnb` links libzmq. Runs as root.
+- All variants contain `iproute2`, `ping` and `tcpdump`, like the former srsRAN images (the srsran-helm gNB chart runs
+  `ip route`). For `dpdk` and `uhd`, `docker/Dockerfile.tools` adds them on top of the upstream image, tagged
+  `<tag>-upstream`.
 - Labels: `ocudu.tag`, `ocudu.revision`, `csi.logger.revision`, `csi.format_version`.
 - `-m`: `-march` of the CPUs that run the gNB, not of the build host. It defaults to `native`, as upstream. One image
   for several CPU families: their common instruction set, e.g. `cascadelake` for Intel Cascade Lake and AMD Zen 4
