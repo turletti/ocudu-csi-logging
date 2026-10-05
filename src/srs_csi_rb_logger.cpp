@@ -1,5 +1,5 @@
 /*
- * Per-RB SRS channel logger, CSI CSV format v3.1 (see srs_csi_rb_logger.h).
+ * SRS channel logger (per RB or per pilot subcarrier), CSI CSV format v3.1 (see srs_csi_rb_logger.h).
  */
 
 #include "srs_csi_rb_logger.h"

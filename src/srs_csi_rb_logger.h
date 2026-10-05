@@ -1,5 +1,5 @@
 /*
- * Per-RB SRS channel logger writing the CSI CSV format v3.1 of oai-csi-logging
+ * SRS channel logger (per RB or per pilot subcarrier) writing the CSI CSV format v3.1 of oai-csi-logging
  * (https://github.com/turletti/oai-csi-logging), so that OCUDU (ex srsRAN Project) and OAI runs are collected and
  * analysed with the same tools (5g_ansible collection/live view, Streamlit visualizer, csi_diag.py).
  *
@@ -14,9 +14,10 @@
 
 namespace csi_log {
 
-/// \brief Process-wide per-RB SRS channel logger.
+/// \brief Process-wide SRS channel logger (per RB, or per pilot subcarrier with CSI_GRANULARITY=subcarrier).
 ///
-/// Enabled when the environment variable CSI_ENABLED is "true" or "1" when get() is first called.
+/// Enabled when the environment variable CSI_ENABLED is "true" or "1" at program start (the logger is created
+/// before main(), see srs_csi_rb_logger.cpp).
 /// Other environment variables:
 ///   CSI_OUTPUT_DIR          output directory, file csi_per_rb.csv (default /data/csi, truncated at start)
 ///   CSI_GRANULARITY         "rb" (default): complex mean of the SRS pilots of each RB

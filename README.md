@@ -1,6 +1,6 @@
-# Per-RB SRS CSI logger for OCUDU (CSI CSV format v3.1)
+# SRS CSI logger for OCUDU (CSI CSV format v3.1)
 
-Adds to OCUDU (ex srsRAN Project) a per-RB SRS channel logger that writes the CSI CSV format v3.1 of
+Adds to OCUDU (ex srsRAN Project) an SRS channel logger (per RB or per pilot subcarrier) that writes the CSI CSV format v3.1 of
 [oai-csi-logging](https://github.com/turletti/oai-csi-logging), so that OCUDU and OAI runs share the same
 collection (5g_ansible), live view and analysis tools. No fork: the OCUDU tree is patched by text anchors.
 
@@ -14,7 +14,6 @@ collection (5g_ansible), live view and analysis tools. No fork: the OCUDU tree i
   already patched tree is left as is (an older hook is not updated).
 - `build_image.sh`: clones an OCUDU tag, applies the script and builds the gNB image (see below).
 - `docker/Dockerfile.zmq`: ZeroMQ variant (the upstream images are built without ZeroMQ).
-- `ocudu-release_26_10-srs-csi.diff`: the resulting diff on `release_26_10`, for review only (use the script).
 - `tests/`: see below.
 
 Changes made in the OCUDU tree:
@@ -49,23 +48,43 @@ The logger is created before `main()` (static initialisation), so the preallocat
 ## Image
 
 ```bash
-./build_image.sh -t release_26_10 -m <march of the RAN node> -v dpdk    # ocudu-gnb-csi:release_26_10
-./build_image.sh -t release_26_10 -m <march of the RAN node> -v zmq     # ocudu-gnb-csi:release_26_10-zmq
-./build_image.sh -s <ocudu source tree> ...                               # no clone (e.g. extracted git archive)
+./build_image.sh -t release_26_10 -m <march> -v dpdk    # ocudu-gnb-csi:release_26_10      O-RAN 7.2 (Benetel)
+./build_image.sh -t release_26_10 -m <march> -v uhd     # ocudu-gnb-csi:release_26_10-uhd  USRP
+./build_image.sh -t release_26_10 -m <march> -v zmq     # ocudu-gnb-csi:release_26_10-zmq  ZeroMQ (simulated RF)
+./build_image.sh -s <clean ocudu source tree> ...         # no clone (the tree is copied, never modified)
 ```
 
-- `dpdk`: upstream `docker/Dockerfile`, unmodified, target `runtime-dpdk`, `COMPONENT=gnb`. It runs as uid 1001
-  (file capabilities on `gnb`).
-- `zmq`: `docker/Dockerfile.zmq`, which reuses the upstream build scripts and checks that `gnb` links libzmq.
+- `dpdk`, `uhd`: upstream `docker/Dockerfile`, unmodified, targets `runtime-dpdk` / `runtime-uhd`, `COMPONENT=gnb`.
+  They run as uid 1001 with file capabilities on `gnb` (`cap_sys_nice,cap_ipc_lock,cap_perfmon+ep`): the container
+  needs these capabilities, otherwise `exec` fails with "operation not permitted":
+  `docker run --cap-add SYS_NICE --cap-add IPC_LOCK --cap-add PERFMON ...` (Kubernetes: `securityContext`
+  `capabilities.add`, or `privileged`).
+- `zmq`: `docker/Dockerfile.zmq`, which reuses the upstream build scripts (upstream images have no ZeroMQ) and checks
+  that `gnb` links libzmq. Runs as root.
 - Labels: `ocudu.tag`, `ocudu.revision`, `csi.logger.revision`, `csi.format_version`.
-- `-m` defaults to `native`, as upstream: only right when the build host has the CPU family of the RAN node.
+- `-m`: `-march` of the CPUs that run the gNB, not of the build host. It defaults to `native`, as upstream. One image
+  for several CPU families: their common instruction set, e.g. `cascadelake` for Intel Cascade Lake and AMD Zen 4
+  (`znver4` includes all of `cascadelake`). A CPU without the instructions crashes with SIGILL.
+- Check: `docker run --rm [--cap-add ...] -e CSI_ENABLED=1 -e CSI_OUTPUT_DIR=/tmp <image> gnb --version` prints
+  `[CSI] SRS logging to /tmp/csi_per_rb.csv ...`.
+- No AW2S support in OCUDU (no driver; only UHD, ZeroMQ, Sidekiq, DIFI and O-RAN 7.2 fronthaul).
+
+Validated on 2026-10-05: OCUDU `release_26_10` (e0db566aac), full `gnb` build with `-Werror` (gcc 13 on Ubuntu 24.04,
+gcc 11.5 on Rocky 9), the three images built with `-m cascadelake` and started with the logger enabled. Not yet
+validated on the testbed (ZMQ, Benetel, USRP runs).
 
 ## Tests
 
 ```bash
-ninja -C <build_dir> srs_estimator_benchmark      # builds the libraries the tests link with
-tests/run_tests.sh <patched_ocudu_dir> <build_dir>
+git clone --depth 1 -b release_26_10 https://gitlab.com/ocudu/ocudu.git
+./patch_ocudu_srs_csi.sh ocudu
+cmake -S ocudu -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_UHD=OFF -DENABLE_ZEROMQ=ON -DENABLE_PLUGINS=OFF
+ninja -C build srs_estimator_benchmark            # builds the libraries the tests link with
+tests/run_tests.sh $PWD/ocudu $PWD/build          # "ALL OK"
 ```
+
+Linux only (g++, python3, ASan/UBSan/TSan runtimes). With conda in the PATH, CMake may pick conda's yaml-cpp/GTest
+and the link of `gnb` fails: configure without conda, or add `-DCMAKE_IGNORE_PREFIX_PATH=<conda prefix>`.
 
 1. `test_mapping`: RB index of the SRS pilots with OCUDU's `get_srs_information()`, 1080 SRS configurations.
 2. `test_logger`: 4 threads, under ASan/UBSan and TSan; values encode their coordinates.
