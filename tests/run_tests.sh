@@ -37,6 +37,11 @@ print("  values: wrong", bad); assert bad == 0
 PY
 done
 
+# 2b. Multi-port SRS: leakage of the other ports into the per-RB value, plain mean vs N-pilot groups (ASan/UBSan)
+g++ -std=c++17 -O1 -g -fsanitize=address,undefined -I$L test_port_leakage.cpp $L/srs_csi_rb_logger.cpp -lpthread \
+  -o $T/test_port_leakage
+$T/test_port_leakage
+
 # 3. Overload: ring of 1e6 rows full between two flushes -> rows dropped and counted
 d=$(mktemp -d -p $T); CSI_ENABLED=1 CSI_OUTPUT_DIR=$d $T/test_logger_address 0 132 2000 0 > /dev/null 2>&1
 python3 check_csv_v31.py $d/csi_per_rb.csv --expect-rows $((4 * 2000 * 2 * 132))
@@ -49,7 +54,7 @@ d=$(mktemp -d -p $T); CSI_OUTPUT_DIR=$d $T/test_logger_address 0 10 5 0
 [ ! -e $d/csi_per_rb.csv ] || { echo "file created while disabled"; exit 1; }
 
 # 5. End to end in OCUDU's SRS estimator: known channel -> logged values, RB/sc indices, ports, RNTI, TA, header,
-#    in rb and subcarrier granularity (sampling 1, 2, 4)
+#    in rb and subcarrier granularity (sampling 1, 2, 4); 1, 2 and 4 SRS ports, comb 2 and 4, interleaved combs
 g++ -std=gnu++17 -O2 $OCUDU_INC test_ocudu_srs_e2e.cpp $OCUDU_LIBS -lpthread -o $T/test_ocudu_srs_e2e
 for mode in rb:1 subcarrier:1 subcarrier:2 subcarrier:4; do
   d=$(mktemp -d -p $T)

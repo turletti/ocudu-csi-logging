@@ -10,7 +10,14 @@
 //   B: comb 4, 4 symbols, freq shift 5   -> logged value = H(rb)                              (strict)
 //   C: comb 2, 1 symbol,  delay 0.3 us   -> TA compensated: |value| = |H|, phase nearly flat  (loose)
 //   D: no srs_context                     -> rnti 0x0000
-//   E: 2 SRS ports                        -> nothing logged
+//   E: comb 2, 2 SRS ports                -> one row per port, value = H(port, rb)   (groups of 2 pilots)
+//   F: comb 4, 2 SRS ports                -> idem (groups of 2 pilots straddle RBs)   (OCUDU default comb)
+//   G: comb 4, 4 SRS ports, cyclic shift 6 -> interleaved combs, groups of 2 pilots
+//   H: comb 2, 4 SRS ports                -> groups of 4 pilots
+//   I: comb 4, 4 SRS ports, cyclic shift 0 -> groups of 4 pilots (16 subcarriers): RBs without a group centre are
+//                                             not logged
+//   The channel differs between SRS ports (amplitude and phase), so a plain per-RB mean, which leaves the other
+//   ports in the estimate, fails the comparison. Multi-port occasions are not logged in subcarrier granularity.
 //
 // Usage: test_ocudu_srs_e2e <out_dir>     (CSI_ENABLED=1 CSI_OUTPUT_DIR=<out_dir> must be set)
 
@@ -40,11 +47,11 @@ constexpr unsigned           nof_grid_ports = 4;
 constexpr unsigned           rx_ports[]     = {1, 3};
 constexpr subcarrier_spacing scs            = subcarrier_spacing::kHz30;
 
-/// Known channel of RX port p at carrier RB rb (constant phase per port: no delay).
-cf_t channel(unsigned p, unsigned rb)
+/// Known channel of RX port p and SRS port tx at carrier RB rb (constant phase per RB: no delay).
+cf_t channel(unsigned p, unsigned tx, unsigned rb)
 {
-  float amp   = (p == 1 ? 1.0F : 0.5F) * (1.0F + 0.004F * static_cast<float>(rb));
-  float phase = (p == 1 ? 0.7F : -2.1F);
+  float amp   = (p == 1 ? 1.0F : 0.5F) * (1.0F + 0.004F * static_cast<float>(rb)) * (1.0F - 0.15F * static_cast<float>(tx));
+  float phase = (p == 1 ? 0.7F : -2.1F) + 1.3F * static_cast<float>(tx);
   return std::polar(amp, phase);
 }
 
@@ -57,6 +64,7 @@ struct test_case {
   double       delay_s;
   bool         with_context;
   unsigned     nof_tx_ports;
+  unsigned     cyclic_shift;
 };
 
 } // namespace
@@ -82,11 +90,15 @@ int main(int argc, char** argv)
   std::unique_ptr<resource_grid> grid = rg_factory->create(nof_grid_ports, get_nsymb_per_slot(cyclic_prefix::NORMAL), nof_subc);
   report_fatal_error_if_not(estimator && seq_gen && grid, "objects");
 
-  const test_case cases[] = {{'A', 1, tx_comb_size::n2, 1, 0, 0.0, true, 1},
-                             {'B', 2, tx_comb_size::n4, 4, 5, 0.0, true, 1},
-                             {'C', 3, tx_comb_size::n2, 1, 0, 0.3e-6, true, 1},
-                             {'D', 4, tx_comb_size::n2, 1, 0, 0.0, false, 1},
-                             {'E', 5, tx_comb_size::n2, 1, 0, 0.0, true, 2}};
+  const test_case cases[] = {{'A', 1, tx_comb_size::n2, 1, 0, 0.0, true, 1, 0},
+                             {'B', 2, tx_comb_size::n4, 4, 5, 0.0, true, 1, 0},
+                             {'C', 3, tx_comb_size::n2, 1, 0, 0.3e-6, true, 1, 0},
+                             {'D', 4, tx_comb_size::n2, 1, 0, 0.0, false, 1, 0},
+                             {'E', 5, tx_comb_size::n2, 1, 0, 0.0, true, 2, 0},
+                             {'F', 6, tx_comb_size::n4, 1, 0, 0.0, true, 2, 0},
+                             {'G', 7, tx_comb_size::n4, 1, 0, 0.0, true, 4, 6},
+                             {'H', 8, tx_comb_size::n2, 1, 0, 0.0, true, 4, 0},
+                             {'I', 9, tx_comb_size::n4, 1, 0, 0.0, true, 4, 0}};
 
   std::FILE* expected = std::fopen((out_dir + "/expected.csv").c_str(), "w");
   report_fatal_error_if_not(expected != nullptr, "cannot write expected.csv");
@@ -105,7 +117,7 @@ int main(int argc, char** argv)
     res.bandwidth_index     = 0;
     res.comb_size           = tc.comb;
     res.comb_offset         = 1;
-    res.cyclic_shift        = 0;
+    res.cyclic_shift        = tc.cyclic_shift;
     res.freq_position       = 0;
     res.freq_shift          = tc.freq_shift;
     res.freq_hopping        = 0;
@@ -134,7 +146,7 @@ int main(int argc, char** argv)
             unsigned sc    = info.mapping_initial_subcarrier + k * info.comb_size;
             double   ph    = -2.0 * M_PI * static_cast<double>(sc) * scs_to_khz(scs) * 1e3 * tc.delay_s;
             cf_t     delay = std::polar(1.0F, static_cast<float>(ph));
-            symbol[sc] += channel(p, sc / NOF_SUBCARRIERS_PER_RB) * delay * seq[k];
+            symbol[sc] += channel(p, i_tx, sc / NOF_SUBCARRIERS_PER_RB) * delay * seq[k];
           }
         }
         grid->get_writer().put(p, l, 0, symbol);
@@ -144,41 +156,53 @@ int main(int argc, char** argv)
     srs_estimator_result result = estimator->estimate(grid->get_reader(), config);
     std::printf("case %c: TA %.3f us (true %.3f us)\n", tc.name, result.time_alignment.time_alignment * 1e6, tc.delay_s * 1e6);
 
-    if (tc.nof_tx_ports != 1) {
-      continue; // nothing expected
-    }
-    srs_information info = get_srs_information(res, 0);
-    unsigned        rb0  = info.mapping_initial_subcarrier / NOF_SUBCARRIERS_PER_RB;
-    unsigned        rb1  = (info.mapping_initial_subcarrier + (info.sequence_length - 1) * info.comb_size) / NOF_SUBCARRIERS_PER_RB;
-    for (unsigned p : rx_ports) {
-      // Per pilot: the channel is constant in an RB.
-      for (unsigned k = 0; k != info.sequence_length; ++k) {
-        unsigned sc = info.mapping_initial_subcarrier + k * info.comb_size;
-        cf_t     h  = channel(p, sc / NOF_SUBCARRIERS_PER_RB);
-        std::fprintf(expected_sc,
-                     "%c,%u,%u,0x%04x,%u,0,%u,%u,%.6g,%.6g\n",
-                     tc.name,
-                     config.slot.sfn(),
-                     config.slot.slot_index(),
-                     tc.with_context ? 0x4601U : 0U,
-                     p,
-                     static_cast<unsigned>(sc / NOF_SUBCARRIERS_PER_RB),
-                     static_cast<unsigned>(sc % NOF_SUBCARRIERS_PER_RB),
-                     h.real(),
-                     h.imag());
+    // Expected rows. Pilots averaged by groups of `group` (the number of SRS ports sharing a comb), each group in the
+    // RB of its centre subcarrier (written here independently of the logger).
+    bool     interleaved = (tc.nof_tx_ports == 4) && (tc.cyclic_shift >= ((tc.comb == tx_comb_size::n4) ? 6U : 4U));
+    unsigned group       = (tc.nof_tx_ports == 1) ? 1 : (interleaved ? 2 : tc.nof_tx_ports);
+    for (unsigned i_tx = 0; i_tx != tc.nof_tx_ports; ++i_tx) {
+      srs_information info = get_srs_information(res, i_tx);
+      std::vector<bool> rb_logged(MAX_NOF_PRBS, false);
+      for (unsigned m = 0; m != info.sequence_length / group; ++m) {
+        double first  = info.mapping_initial_subcarrier + m * group * info.comb_size;
+        double centre = first + 0.5 * (group - 1) * info.comb_size;
+        rb_logged[static_cast<unsigned>(centre / NOF_SUBCARRIERS_PER_RB)] = true;
       }
-      for (unsigned rb = rb0; rb <= rb1; ++rb) {
-        cf_t h = channel(p, rb);
-        std::fprintf(expected,
-                     "%c,%u,%u,0x%04x,%u,0,%u,%.6g,%.6g\n",
-                     tc.name,
-                     config.slot.sfn(),
-                     config.slot.slot_index(),
-                     tc.with_context ? 0x4601U : 0U,
-                     p,
-                     rb,
-                     h.real(),
-                     h.imag());
+      for (unsigned p : rx_ports) {
+        // Per pilot (single-port occasions only: multi-port occasions are not logged in subcarrier granularity).
+        for (unsigned k = 0; group == 1 && k != info.sequence_length; ++k) {
+          unsigned sc = info.mapping_initial_subcarrier + k * info.comb_size;
+          cf_t     h  = channel(p, i_tx, sc / NOF_SUBCARRIERS_PER_RB);
+          std::fprintf(expected_sc,
+                       "%c,%u,%u,0x%04x,%u,%u,%u,%u,%.6g,%.6g\n",
+                       tc.name,
+                       config.slot.sfn(),
+                       config.slot.slot_index(),
+                       tc.with_context ? 0x4601U : 0U,
+                       p,
+                       i_tx,
+                       static_cast<unsigned>(sc / NOF_SUBCARRIERS_PER_RB),
+                       static_cast<unsigned>(sc % NOF_SUBCARRIERS_PER_RB),
+                       h.real(),
+                       h.imag());
+        }
+        for (unsigned rb = 0; rb != MAX_NOF_PRBS; ++rb) {
+          if (!rb_logged[rb]) {
+            continue;
+          }
+          cf_t h = channel(p, i_tx, rb);
+          std::fprintf(expected,
+                       "%c,%u,%u,0x%04x,%u,%u,%u,%.6g,%.6g\n",
+                       tc.name,
+                       config.slot.sfn(),
+                       config.slot.slot_index(),
+                       tc.with_context ? 0x4601U : 0U,
+                       p,
+                       i_tx,
+                       rb,
+                       h.real(),
+                       h.imag());
+        }
       }
     }
   }

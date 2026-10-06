@@ -18,8 +18,10 @@ if meta.get("columns") != exp_cols:
 hdr = next(l for l in L if l.startswith("frame"))
 if hdr.split(",") != exp_cols:
     err.append(f"column line {hdr}")
-if (meta.get("source") != "ocudu-srs" or meta.get("nb_antenna_rx") != 2 or meta.get("nb_ports_tx") != 1
-        or meta.get("antenna_selection") != [1, 3] or meta.get("port_selection") != [0]):
+# nb_ports_tx / port_selection: maximum number of SRS ports (4) and the selected ones (the header is written before
+# the multi-port occasions may appear); the port_tx column gives the port of each row.
+if (meta.get("source") != "ocudu-srs" or meta.get("nb_antenna_rx") != 2 or meta.get("nb_ports_tx") != 4
+        or meta.get("antenna_selection") != [1, 3] or meta.get("port_selection") != [0, 1, 2, 3]):
     err.append(f"JSON header {meta}")
 if per_sc and meta.get("srs_comb") != 2:
     err.append(f"JSON srs_comb {meta.get('srs_comb')} (2 expected: comb of the first occasion)")
@@ -50,12 +52,13 @@ if set(got) != set(exp):
                f"e.g. unexpected {sorted(set(got) - set(exp))[:3]} missing {sorted(set(exp) - set(got))[:3]}")
 for slot, case in sorted(case_of_slot.items()):
     keys = sorted(k for k in exp if k[1] == slot and k in got)
+    ports = sorted({k[4] for k in keys})
     rel = [abs(got[k] - exp[k]) / abs(exp[k]) for k in keys]
     mag = [abs(got[k]) / abs(exp[k]) - 1 for k in keys]
     dph = [cmath.phase(got[k] / exp[k]) for k in keys]
     scs = sorted({k[6] for k in keys}) if per_sc else None
     print(f"  case {case}: {len(keys)} rows, max rel err {max(rel):.4f}, max |mag| err {max(map(abs, mag)):.4f}, "
-          f"residual phase [{min(dph):+.3f}, {max(dph):+.3f}] rad" + (f", sc {scs}" if per_sc else ""))
+          f"residual phase [{min(dph):+.3f}, {max(dph):+.3f}] rad, ports {ports}" + (f", sc {scs}" if per_sc else ""))
     if case == "C":  # delayed channel: TA compensated, so magnitude exact and phase nearly flat
         if max(map(abs, mag)) > 0.03 or max(dph) - min(dph) > 0.3:
             err.append("case C: TA compensation")

@@ -34,7 +34,7 @@ A_CFG_CTX='std::optional<srs_context> context;'
 A_EST_INC='#include "srs_estimator_generic_impl.h"'
 A_EST_HOOK='compensate_phase_shift(mean_lse, phase_shift_subcarrier, phase_shift_offset);'
 # Identifiers used by the hook, in the scope of the anchor.
-EST_IDENTIFIERS=(nof_tx_antenna_ports nof_rx_ports comb_size 'config.ports[' 'config.slot' 'info.mapping_initial_subcarrier' 'i_rx_port' 'i_antenna_port' 'span<cf_t> mean_lse')
+EST_IDENTIFIERS=(nof_tx_antenna_ports nof_rx_ports comb_size interleaved_pilots 'config.ports[' 'config.slot' 'info.mapping_initial_subcarrier' 'i_rx_port' 'i_antenna_port' 'span<cf_t> mean_lse')
 
 die() { echo "patch_ocudu_srs_csi: ERROR: $*" >&2; exit 1; }
 count() { grep -cF -- "$2" "$1" || true; }

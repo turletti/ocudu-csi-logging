@@ -31,7 +31,9 @@ Changes made in the OCUDU tree:
   OCUDU run as uid 1001: the hostPath must be writable by that uid.
 - `CSI_FLUSH_CORE`: housekeeping CPU for the writer thread (recommended).
 - `CSI_ANTENNA_SELECTION`, `CSI_PORT_SELECTION` (`all` or comma list), `CSI_INCLUDE_HEADER`. Antennas are the
-  physical RX ports; the JSON `antenna_selection` / `port_selection` list the values present in the file.
+  physical RX ports; the JSON `antenna_selection` lists the antennas present in the file. `nb_ports_tx` is the
+  maximum number of SRS ports (4) and `port_selection` the selected ports among 0..3: the header is written at the
+  first flush, usually before the UE capabilities raise the number of SRS ports. The `port_tx` column gives the port.
 - `CSI_GRANULARITY`: `rb` (default, complex mean of the SRS pilots of each RB) or `subcarrier` (one row per SRS
   pilot, column `sc` = subcarrier in the RB). Unlike OAI, which interpolates its SRS estimate on the 12 subcarriers,
   OCUDU only has the LS estimate on the pilots (every comb-th subcarrier): `sc` takes the values k_TC + j·comb, and
@@ -40,7 +42,19 @@ Changes made in the OCUDU tree:
   index in the RB (`sc / comb`) is a multiple of N. The OAI rule (`sc % N == 0`) is not used: with an odd comb
   offset it can keep no pilot at all. A `subcarrier` file has up to 6x the rows of an `rb` file (comb 2): the
   1e6-row buffer per 5 s fills faster (rows dropped and counted).
-- Periodic SRS must be configured in the gNB. Only single-port SRS is logged.
+- Periodic SRS must be configured in the gNB.
+- SRS ports. OCUDU takes the number of SRS ports from the UE capabilities for the band
+  (`du_pusch_resource_manager::select_srs_nof_ports()`, no cell parameter caps it): 1 port until the UE capability
+  exchange, then often 2 (or 4) after the RRC reconfiguration. With N ports on one comb, the cyclic shifts are
+  n_cs_max/N apart, so the LS estimate of port p on pilot k is H_p[k] + Σ_{q≠p} H_q[k]·e^{j2π(q−p)k/N}: one pilot
+  does not separate the ports. In `rb` granularity the value of a port is the mean of groups of N consecutive
+  pilots (2 with 4 ports on interleaved combs), each group in the RB of its centre subcarrier: the other ports
+  cancel when the channel is flat over the group. Simulated leakage of the other ports (3-tap channel up to about
+  300 ns, 40 RB): comb 4 and 2 ports −35 dB (plain per-RB mean −9.5 dB), comb 2 and 4 ports −34 dB, comb 4 and 4
+  ports on one comb −28 dB (`tests/test_port_leakage.cpp`). With comb 4 and 4 ports on one comb, a group covers
+  16 subcarriers: RBs without a group centre are not logged. In `subcarrier` granularity multi-port occasions are
+  not logged (one message on stderr). This assumes `cyclic_shift_reuse_factor: 1` (default): with cyclic shift
+  reuse, other UEs use intermediate cyclic shifts that N-pilot groups do not cancel.
 
 The logger is created before `main()` (static initialisation), so the preallocation of the two 1e6-row buffers
 (~20 ms) does not happen in a PHY thread on the first SRS occasion.
@@ -96,8 +110,12 @@ and the link of `gnb` fails: configure without conda, or add `-DCMAKE_IGNORE_PRE
 5. `test_ocudu_srs_e2e` + `check_ocudu_e2e.py`: a known channel is written on the SRS pilots of a resource grid,
    OCUDU's SRS estimator runs, and the logged rows are compared with the expected ones. It checks the RB indices,
    the physical RX ports (grid ports 1 and 3), the RNTI from `srs_context` (and 0 without context), the frame and slot,
-   the values (comb 2 and 4, 1 and 4 symbols, frequency shift) and the TA compensation (0.3 us delay), and that
-   2-port SRS is not logged; in `rb` granularity and in `subcarrier` granularity with sampling 1, 2 and 4 (JSON
-   header and column lists checked too).
+   the values (comb 2 and 4, 1 and 4 symbols, frequency shift) and the TA compensation (0.3 us delay), and the
+   multi-port SRS (a different channel per SRS port: 2 ports comb 2 and 4, 4 ports comb 2, 4 ports comb 4 on one
+   comb and on interleaved combs; a plain per-RB mean fails these cases); in `rb` granularity and in `subcarrier`
+   granularity with sampling 1, 2 and 4, where multi-port occasions are not logged (JSON header and column lists
+   checked too).
+6. `test_port_leakage`: leakage of the other SRS ports into the per-RB value, plain mean vs N-pilot groups, on random
+   3-tap channels (ASan/UBSan); `average_per_rb_grouped` with groups of 1 is checked against `average_per_rb`.
 
 `check_csv_v31.py FILE` also accepts OAI files. `test_latency.cpp` is informative only.

@@ -3,6 +3,7 @@
  */
 
 #include "srs_csi_rb_logger.h"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -42,6 +43,8 @@ constexpr size_t   ring_capacity  = 1000000;
 constexpr unsigned flush_period_s = 5;
 /// Maximum number of RBs of a carrier (NR: 275).
 constexpr unsigned max_nof_rb = 275;
+// Maximum number of SRS ports of a UE (TS 38.331 nrofSRS-Ports), written as nb_ports_tx in the JSON header.
+constexpr unsigned max_srs_ports = 4;
 
 bool env_true(const char* name, bool def)
 {
@@ -97,10 +100,8 @@ struct srs_csi_rb_logger::impl {
   // JSON header fields, set by the first log() call (under mutex)
   bool     geometry_set   = false;
   uint8_t  nb_antennas_rx = 0;
-  uint8_t  nb_ports_tx    = 0;
   unsigned comb_size      = 0;  // comb of the first occasion ("subcarrier" granularity)
-  uint64_t ants_seen      = 0;  // RX antennas / SRS ports of the rows logged so far (JSON header)
-  uint64_t ports_seen     = 0;
+  uint64_t ants_seen      = 0;  // RX antennas of the rows logged so far (JSON header)
 
   bool                    closed = false; // set at process exit (under mutex): log() becomes a no-op
   std::atomic<bool>       stop{false};
@@ -109,9 +110,11 @@ struct srs_csi_rb_logger::impl {
   std::thread             writer;
   std::atomic<bool>       multiport_warned{false};
 
-  /// Writes the JSON and column headers once. ants / ports: RX antennas and SRS ports of the rows logged so far, i.e.
-  /// the antenna and port values of the file (physical RX port indices, not 0 .. nb_antenna_rx - 1).
-  void write_header(uint64_t ants_mask, uint64_t ports_mask, unsigned comb)
+  /// Writes the JSON and column headers once. ants: RX antennas of the rows logged so far, i.e. the antenna values of
+  /// the file (physical RX port indices, not 0 .. nb_antenna_rx - 1). The SRS ports are not taken from the rows: the
+  /// header is written at the first flush, often before the UE capabilities raise the number of SRS ports, so it
+  /// gives the maximum (max_srs_ports) and the selected ports among them.
+  void write_header(uint64_t ants_mask, unsigned comb)
   {
     if (header_written || !include_header) {
       return;
@@ -125,7 +128,7 @@ struct srs_csi_rb_logger::impl {
       }
       return s;
     };
-    std::string ants = list(ants_mask), ports = list(ports_mask);
+    std::string ants = list(ants_mask), ports = list(port_mask & ((uint64_t(1) << max_srs_ports) - 1));
     const char* columns = per_subcarrier
                               ? "\"frame\", \"slot\", \"rnti\", \"ant_rx\", \"port_tx\", \"rb\", \"sc\", \"real\", \"imag\""
                               : "\"frame\", \"slot\", \"rnti\", \"ant_rx\", \"port_tx\", \"rb\", \"real\", \"imag\"";
@@ -133,19 +136,23 @@ struct srs_csi_rb_logger::impl {
         per_subcarrier ? "\"sc_values\": \"SRS LS pilots only (every comb-th subcarrier, no interpolation); sc = subcarrier "
                          "in the RB\", \"srs_comb\": " +
                              std::to_string(comb) + ", \"rb_value\": \"SRS LS pilot\", "
-                       : std::string("\"rb_value\": \"complex mean of the SRS LS pilots of the RB\", ");
+                       : std::string("\"rb_value\": \"complex mean of the SRS LS pilots of the RB; with N > 1 SRS ports, mean "
+                                     "of the groups of N consecutive pilots centred in the RB (mean of N-pilot groups, "
+                                     "port separation)\", ");
     std::fprintf(file,
                  "# { \"granularity\": \"%s\", \"nb_antenna_rx\": %u, \"nb_ports_tx\": %u, \"antenna_selection\": [ %s ], "
                  "\"port_selection\": [ %s ], \"subcarrier_sampling\": %u, \"format_version\": \"3.1\", "
                  "\"source\": \"ocudu-srs\", \"iq_format\": \"float\", "
                  "\"rb_index\": \"carrier CRB (SRS pilot subcarrier / 12)\", \"srs_symbols\": \"averaged\", "
-                 "\"ta_compensated\": true, %s"
+                 "\"ta_compensated\": true, \"port_tx\": \"SRS port of the UE; the number of SRS ports (1, 2 or 4) "
+                 "comes from the UE capabilities and changes after the RRC reconfiguration: nb_ports_tx is the maximum, "
+                 "the port_tx column gives the port of each row\", %s"
                  "\"timestamp\": \"UTC, taken at flush time = end of the batch that follows the marker\", "
                  "\"flush_period_s\": %u, "
                  "\"columns\": [ %s ] }\n",
                  per_subcarrier ? "subcarrier" : "rb",
                  nb_antennas_rx,
-                 nb_ports_tx,
+                 max_srs_ports,
                  ants.c_str(),
                  ports.c_str(),
                  per_subcarrier ? sc_sampling : 1U,
@@ -163,7 +170,6 @@ struct srs_csi_rb_logger::impl {
   {
     uint64_t n_dropped = 0;
     uint64_t ants      = 0;
-    uint64_t ports     = 0;
     unsigned comb      = 0;
     char     timestamp[32];
     {
@@ -179,14 +185,13 @@ struct srs_csi_rb_logger::impl {
       n_dropped = dropped;
       dropped   = 0;
       ants      = ants_seen;
-      ports     = ports_seen;
       comb      = comb_size;
     }
     std::fprintf(file, "# TIMESTAMP: %s\n", timestamp);
     if (n_dropped != 0) {
       std::fprintf(file, "# DROPPED: %llu\n", static_cast<unsigned long long>(n_dropped));
     }
-    write_header(ants, ports, comb);
+    write_header(ants, comb);
     for (const csi_row& r : spare) {
       if (per_subcarrier) {
         std::fprintf(file,
@@ -345,6 +350,7 @@ void srs_csi_rb_logger::log(uint32_t                   frame,
                             const std::complex<float>* per_rb,
                             unsigned                   n_rb)
 {
+  (void)nb_ports_tx; // the JSON header gives the maximum number of SRS ports, see write_header()
   if (per_rb == nullptr || n_rb == 0 || ant_rx >= 64 || port_tx >= 64 || ((pimpl->ant_mask >> ant_rx) & 1U) == 0 ||
       ((pimpl->port_mask >> port_tx) & 1U) == 0) {
     return;
@@ -355,11 +361,9 @@ void srs_csi_rb_logger::log(uint32_t                   frame,
   }
   if (!pimpl->geometry_set) {
     pimpl->nb_antennas_rx = nb_antennas_rx;
-    pimpl->nb_ports_tx    = nb_ports_tx;
     pimpl->geometry_set   = true;
   }
   pimpl->ants_seen |= uint64_t(1) << ant_rx;
-  pimpl->ports_seen |= uint64_t(1) << port_tx;
   for (unsigned i = 0; i != n_rb; ++i) {
     if (pimpl->rows.size() >= ring_capacity) {
       pimpl->dropped += n_rb - i;
@@ -387,15 +391,60 @@ void srs_csi_rb_logger::log_pilots(uint32_t                   frame,
                                    const std::complex<float>* pilots,
                                    unsigned                   nof_pilots,
                                    unsigned                   initial_subcarrier,
-                                   unsigned                   comb_size)
+                                   unsigned                   comb_size,
+                                   unsigned                   group)
 {
   if (!pimpl->per_subcarrier) {
     // Averaging outside the mutex, on the stack of the calling (PHY) thread.
     std::array<std::complex<float>, max_nof_rb + 1> per_rb;
     uint16_t                                        rb_start = 0;
-    unsigned                                        n_rb =
-        average_per_rb(pilots, nof_pilots, initial_subcarrier, comb_size, per_rb.data(), per_rb.size(), rb_start);
-    log(frame, slot, rnti, ant_rx, port_tx, nb_antennas_rx, nb_ports_tx, rb_start, per_rb.data(), n_rb);
+    if (group <= 1) {
+      unsigned n_rb =
+          average_per_rb(pilots, nof_pilots, initial_subcarrier, comb_size, per_rb.data(), per_rb.size(), rb_start);
+      log(frame, slot, rnti, ant_rx, port_tx, nb_antennas_rx, nb_ports_tx, rb_start, per_rb.data(), n_rb);
+      return;
+    }
+    std::array<uint8_t, max_nof_rb + 1> counts;
+    unsigned                            n_rb = average_per_rb_grouped(pilots,
+                                                   nof_pilots,
+                                                   initial_subcarrier,
+                                                   comb_size,
+                                                   group,
+                                                   per_rb.data(),
+                                                   counts.data(),
+                                                   per_rb.size(),
+                                                   rb_start);
+    // Log the runs of RBs that contain at least one group (an RB without group has no value).
+    for (unsigned i = 0; i != n_rb;) {
+      if (counts[i] == 0) {
+        ++i;
+        continue;
+      }
+      unsigned j = i;
+      while (j != n_rb && counts[j] != 0) {
+        ++j;
+      }
+      log(frame,
+          slot,
+          rnti,
+          ant_rx,
+          port_tx,
+          nb_antennas_rx,
+          nb_ports_tx,
+          static_cast<uint16_t>(rb_start + i),
+          per_rb.data() + i,
+          j - i);
+      i = j;
+    }
+    return;
+  }
+  if (group > 1) {
+    // A single pilot contains the other SRS ports: nothing to log in subcarrier granularity.
+    if (!pimpl->multiport_warned.exchange(true)) {
+      std::fprintf(stderr,
+                   "[CSI] SRS occasions with more than one SRS port are not logged in subcarrier granularity: a single "
+                   "pilot does not separate the ports (use CSI_GRANULARITY=rb)\n");
+    }
     return;
   }
   constexpr unsigned nre = 12;
@@ -409,12 +458,10 @@ void srs_csi_rb_logger::log_pilots(uint32_t                   frame,
   }
   if (!pimpl->geometry_set) {
     pimpl->nb_antennas_rx = nb_antennas_rx;
-    pimpl->nb_ports_tx    = nb_ports_tx;
     pimpl->comb_size      = comb_size;
     pimpl->geometry_set   = true;
   }
   pimpl->ants_seen |= uint64_t(1) << ant_rx;
-  pimpl->ports_seen |= uint64_t(1) << port_tx;
   for (unsigned k = 0; k != nof_pilots; ++k) {
     unsigned subcarrier = initial_subcarrier + k * comb_size;
     auto     sc         = static_cast<uint8_t>(subcarrier % nre);
@@ -435,15 +482,6 @@ void srs_csi_rb_logger::log_pilots(uint32_t                   frame,
                                   sc,
                                   pilots[k].real(),
                                   pilots[k].imag()});
-  }
-}
-
-void srs_csi_rb_logger::note_multiport_skipped()
-{
-  if (!pimpl->multiport_warned.exchange(true)) {
-    std::fprintf(stderr,
-                 "[CSI] SRS occasions with more than one SRS port are not logged: per-RB averaging does not separate "
-                 "the ports (cyclic shifts)\n");
   }
 }
 
@@ -485,5 +523,57 @@ unsigned srs_csi_rb_logger::average_per_rb(const std::complex<float>* pilots,
   if (count != 0 && n_rb < capacity) {
     per_rb[n_rb++] = sum / static_cast<float>(count);
   }
+  return n_rb;
+}
+
+unsigned srs_csi_rb_logger::average_per_rb_grouped(const std::complex<float>* pilots,
+                                                   unsigned                   nof_pilots,
+                                                   unsigned                   initial_subcarrier,
+                                                   unsigned                   comb_size,
+                                                   unsigned                   group,
+                                                   std::complex<float>*       per_rb,
+                                                   uint8_t*                   counts,
+                                                   unsigned                   capacity,
+                                                   uint16_t&                  rb_start)
+{
+  constexpr unsigned nre = 12;
+  rb_start               = static_cast<uint16_t>(initial_subcarrier / nre);
+  if (pilots == nullptr || per_rb == nullptr || group == 0 || comb_size == 0 || nof_pilots < group || capacity == 0) {
+    return 0;
+  }
+  unsigned n_groups = nof_pilots / group;
+  // Centre subcarrier of group m, in half subcarriers to stay integer: pilots m * group .. m * group + group - 1.
+  auto centre2 = [initial_subcarrier, comb_size, group](unsigned m) {
+    return 2 * initial_subcarrier + comb_size * (2 * m * group + group - 1);
+  };
+  unsigned first_rb = centre2(0) / (2 * nre);
+  unsigned n_rb     = centre2(n_groups - 1) / (2 * nre) - first_rb + 1;
+  n_rb              = std::min(n_rb, std::min(capacity, max_nof_rb));
+  // Group counts on the stack (at most a few groups per RB), whether or not the caller asked for them.
+  std::array<uint8_t, max_nof_rb> cnt{};
+  for (unsigned i = 0; i != n_rb; ++i) {
+    per_rb[i] = 0;
+  }
+  for (unsigned m = 0; m != n_groups; ++m) {
+    unsigned rb = centre2(m) / (2 * nre) - first_rb;
+    if (rb >= n_rb) {
+      break;
+    }
+    std::complex<float> sum = 0;
+    for (unsigned g = 0; g != group; ++g) {
+      sum += pilots[m * group + g];
+    }
+    per_rb[rb] += sum / static_cast<float>(group);
+    ++cnt[rb];
+  }
+  for (unsigned i = 0; i != n_rb; ++i) {
+    if (cnt[i] != 0) {
+      per_rb[i] /= static_cast<float>(cnt[i]);
+    }
+    if (counts != nullptr) {
+      counts[i] = cnt[i];
+    }
+  }
+  rb_start = static_cast<uint16_t>(first_rb);
   return n_rb;
 }
