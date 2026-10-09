@@ -28,7 +28,11 @@ Changes made in the OCUDU tree:
 
 - `CSI_ENABLED=true|1` (otherwise nothing is created and the hook costs one pointer test).
 - `CSI_OUTPUT_DIR` (default `/data/csi`, file `csi_per_rb.csv`, truncated at gNB start). The runtime images of
-  OCUDU run as uid 1001: the hostPath must be writable by that uid.
+  OCUDU run as uid 1001: the hostPath must be writable by that uid. The directory must be on a disk: on a tmpfs
+  (or an overlay on a tmpfs, e.g. a node booted live) the file is in RAM and charged to the gNB container memory,
+  which ends in an OOM kill (a warning is printed at start). After each flush the writer calls `fdatasync` and
+  `posix_fadvise(POSIX_FADV_DONTNEED)`, so the written pages leave the page cache, which is otherwise also charged
+  to the container memory cgroup (a few MB/s with periodic SRS on many RBs).
 - `CSI_FLUSH_CORE`: housekeeping CPU for the writer thread (recommended).
 - `CSI_ANTENNA_SELECTION`, `CSI_PORT_SELECTION` (`all` or comma list), `CSI_INCLUDE_HEADER`. Antennas are the
   physical RX ports; the JSON `antenna_selection` lists the antennas present in the file. `nb_ports_tx` is the

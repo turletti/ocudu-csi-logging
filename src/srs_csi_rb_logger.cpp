@@ -17,7 +17,10 @@
 #include <pthread.h>
 #include <sched.h>
 #include <string>
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
+#include <unistd.h>
 #include <thread>
 #include <vector>
 
@@ -219,6 +222,12 @@ struct srs_csi_rb_logger::impl {
                    static_cast<double>(r.im));
     }
     std::fflush(file);
+    // Drop the written pages from the page cache: in a container they are charged to the gNB memory cgroup, and a
+    // cgroup kept at its limit by reclaiming them makes any gNB thread that needs a page wait for reclaim. Done here,
+    // in the writer thread, never in a PHY thread. fdatasync first: DONTNEED does not drop dirty pages.
+    const int fd = ::fileno(file);
+    ::fdatasync(fd);
+    ::posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
     spare.clear(); // keeps the capacity (and the already faulted pages)
   }
 
@@ -320,6 +329,16 @@ srs_csi_rb_logger* srs_csi_rb_logger::get()
                  path.c_str(),
                  p->per_subcarrier ? "subcarrier" : "rb",
                  p->sc_sampling);
+    // A file on tmpfs is in RAM (and charged to the container memory as shmem): at several MB/s it ends in an OOM.
+    // An overlay may also sit on tmpfs (live systems): the underlying filesystem cannot be seen from here.
+    constexpr long tmpfs_magic = 0x01021994, overlay_magic = 0x794c7630;
+    if (struct statfs fs; ::statfs(dir.c_str(), &fs) == 0 && (fs.f_type == tmpfs_magic || fs.f_type == overlay_magic)) {
+      std::fprintf(stderr,
+                   "[CSI] WARNING: %s is on %s: the CSI file may be in RAM and counted in the container memory; "
+                   "use a directory on a disk\n",
+                   dir.c_str(),
+                   fs.f_type == tmpfs_magic ? "tmpfs" : "an overlay filesystem");
+    }
     return logger;
   }();
   return instance;
